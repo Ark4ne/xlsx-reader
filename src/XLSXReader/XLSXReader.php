@@ -3,8 +3,6 @@
 namespace Ark4ne\XLSXReader;
 
 use BadMethodCallException;
-use DOMDocument;
-use DOMNode;
 use Exception;
 use Generator;
 
@@ -166,25 +164,19 @@ class XLSXReader
     public function read(int $start = 0, int $end = null): Generator
     {
         if ($start < 0)
-            throw new BadMethodCallException("\$start must be a positive integer.");
+            throw new BadMethodCallException('$start must be a positive integer.');
 
         $end = $end ?? INF;
 
         if ($start > $end)
-            throw new BadMethodCallException("\$start must be less then \$end.");
+            throw new BadMethodCallException('$start must be less then $end.');
 
 
         if (!isset($this->worksheet['id'])) {
             $this->selectSheetByIndex(0);
         }
 
-        $reader = new XMLReader;
-
-        $file = "{$this->file}#xl/worksheets/sheet{$this->worksheet['id']}.xml";
-
-        if (!$reader->open("zip://$file")) {
-            throw new Exception("Can't open file $file.");
-        }
+        $reader = $this->getXMLReader("xl/worksheets/sheet{$this->worksheet['id']}.xml");
 
         try {
             if (!$reader->find('row')) {
@@ -193,10 +185,13 @@ class XLSXReader
 
             $row_count = $start;
 
-            while ($start-- && $reader->next('row')) ;
+            /** @noinspection PhpStatementHasEmptyBodyInspection */
+            /** @noinspection PhpStatementWithoutBracesInspection */
+            while ($start-- && $reader->next('row'))
+                /** @noinspection SuspiciousSemicolonInspection */ ;
 
             do {
-                yield $row_count++ => $this->parseRow($reader->expand());
+                yield $row_count++ => $this->readRow($reader);
             } while ($end >= $row_count && $reader->next('row'));
         } finally {
             $reader->close();
@@ -221,61 +216,55 @@ class XLSXReader
     }
 
     /**
-     * Parse a DOMNode to string[]
+     * Read a row.
      *
-     * @param \DOMNode $row
+     * @param \Ark4ne\XLSXReader\XMLReader $reader
      *
      * @return array
      */
-    protected function parseRow(DOMNode $row): array
+    protected function readRow(XMLReader $reader): array
     {
-        $values = [];
-
-        /** @var \DOMNodeList|\DOMNode[] $cols */
-        $cols = $row->childNodes;
-
         $shared = $this->shared;
         $formats = $this->formats;
 
-        foreach ($cols as $col) {
-            $attrs = $col->attributes;
-            $attr_type = $attrs->getNamedItem('t');
-            $type = $attr_type ? $attr_type->nodeValue : null;
+        $values = [];
 
-            if (null === $type) {
-                $attr_style = $attrs->getNamedItem('s');
-                $style = $attr_style ? $attr_style->nodeValue : null;
-                $type = $formats[$style]['type'] ?? null;
+        while ($reader->read()) {
+            $node_name = $reader->name;
+            $node_type = $reader->nodeType;
+
+            if (XMLReader::END_ELEMENT === $node_type && 'row' === $node_name) {
+                break;
             }
 
-            switch ($type) {
-                case self::TYPE_SHARED_STRING:
+            if (XMLReader::ELEMENT !== $node_type) {
+                continue;
+            }
+
+            if ('c' === $node_name) {
+                $type = $reader->getAttribute('t');
+
+                if (null === $type) {
+                    $style = $reader->getAttribute('s');
+                    $type = $formats[$style]['type'] ?? null;
+                }
+
+                $reader->find('v');
+
+                $node_value = $reader->readValue();
+
+                if ($type === self::TYPE_SHARED_STRING) {
                     // shared string
-                    $value = $shared[$col->nodeValue];
-                    break;
-                case self::TYPE_DATE:
+                    $value = $shared[$node_value];
+                } elseif ($type === self::TYPE_DATE) {
                     // date
-                    $value = $this->parseDate((float)$col->nodeValue);
-                    break;
-                case self::TYPE_BOOLEAN:
+                    $value = $this->parseDate((float)$node_value);
+                } elseif ($type === self::TYPE_BOOLEAN) {
                     // boolean
-                    $value = (bool)$col->nodeValue;
-                    break;
-                default:
+                    $value = (bool)$node_value;
+                } else {
                     // string / number
-                    $value = null;
-
-                    foreach ($col->childNodes as $node) {
-                        /** @var DOMNode $node */
-                        if ($node->nodeName === 'v') {
-                            $value = $node->nodeValue;
-                            break;
-                        }
-                    }
-
-                    if ($value === null) {
-                        $value = $col->nodeValue;
-                    }
+                    $value = $node_value;
 
                     // Check for numeric values
                     if (is_numeric($value)) {
@@ -285,9 +274,10 @@ class XLSXReader
                             $value = (float)$value;
                         }
                     }
-            }
+                }
 
-            $values[] = $value;
+                $values[] = $value;
+            }
         }
 
         return $values;
@@ -323,16 +313,10 @@ class XLSXReader
      */
     protected function loadSharedString()
     {
-        $file = "{$this->file}#xl/sharedStrings.xml";
+        $reader = $this->getXMLReader('xl/sharedStrings.xml');
 
-        $reader = new XMLReader();
-
-        if (!$reader->open("zip://$file")) {
-            throw new Exception("Can't open file $file.");
-        }
-
-        while ($reader->find('t') && $reader->read() && $reader->nodeType === XMLReader::TEXT) {
-            $this->shared[] = $reader->value;
+        while ($reader->find('t')) {
+            $this->shared[] = $reader->readValue();
         }
 
         $reader->close();
@@ -345,44 +329,45 @@ class XLSXReader
      */
     protected function loadFormats()
     {
+        $in_cellxfs = false;
         $styles = self::XLSX_FORMATS;
 
-        $dom = $this->getDOMParts("xl/styles.xml");
+        $reader = $this->getXMLReader('xl/styles.xml');
 
-        /** @var \DOMNodeList|\DOMNode[] $num_formats */
-        $num_formats = $dom->getElementsByTagName('numFmts')[0]->childNodes;
-
-        foreach ($num_formats as $format) {
-            $attrs = $format->attributes;
-            $styles[$attrs->getNamedItem('numFmtId')->nodeValue] = $attrs->getNamedItem('formatCode')->nodeValue;
-        }
-
-        /** @var \DOMNodeList|\DOMNode[] $cols */
-        $cols = $dom->getElementsByTagName('cellXfs')[0]->childNodes;
-
-        foreach ($cols as $col) {
-            $attrs = $col->attributes;
-            $nfi = $attrs->getNamedItem('numFmtId');
-            $nfi = $nfi ? $nfi->nodeValue : null;
-
-            $style = $styles[$nfi] ?? null;
-            $type = null;
-            if ($nfi !== '0' && $style) {
-                $test = preg_replace('((?<!\\\)\[.+?(?<!\\\)\])', '', $style);
-
-                foreach (self::DATE_TIME_CHARACTERS as $character) {
-                    if (strpos($test, $character) !== false) {
-                        $type = self::TYPE_DATE;
-                        break;
-                    }
-                }
+        while ($reader->read()) {
+            if ($reader->nodeType !== XMLReader::ELEMENT) {
+                continue;
             }
 
-            $this->formats[] = [
-                'style' => $style,
-                'type' => $type,
-            ];
+            $current_name = $reader->name;
+
+            if ('numFmt' === $current_name) {
+                $styles[$reader->getAttribute('numFmtId')] = $reader->getAttribute('formatCode');
+            } elseif ('cellXfs' === $current_name) {
+                $in_cellxfs = !$in_cellxfs;
+            } elseif ('xf' === $current_name && $in_cellxfs) {
+                $nfi = $reader->getAttribute('numFmtId');
+                $style = $styles[$nfi] ?? null;
+                $type = null;
+                if ($nfi !== '0' && $style) {
+                    $test = preg_replace('((?<!\\\)\[.+?(?<!\\\)])', '', $style);
+
+                    foreach (self::DATE_TIME_CHARACTERS as $character) {
+                        if (strpos($test, $character) !== false) {
+                            $type = self::TYPE_DATE;
+                            break;
+                        }
+                    }
+                }
+
+                $this->formats[] = [
+                    'style' => $style,
+                    'type' => $type,
+                ];
+            }
         }
+
+        $reader->close();
     }
 
     /**
@@ -392,41 +377,44 @@ class XLSXReader
      */
     protected function loadWorkbook()
     {
-        $dom = $this->getDOMParts('xl/workbook.xml');
+        $reader = $this->getXMLReader('xl/workbook.xml');
 
-        /** @var \DOMNodeList|\DOMNode[] $sheets */
-        $sheets = $dom->getElementsByTagName('sheets')[0]->childNodes;
+        while ($reader->read()) {
+            if ($reader->nodeType !== XMLReader::ELEMENT) {
+                continue;
+            }
 
-        foreach ($sheets as $sheet) {
-            $attrs = $sheet->attributes;
-            $this->worksheets[] = [
-                'name' => $attrs->getNamedItem('name')->nodeValue,
-                'id' => (int)$attrs->getNamedItem('sheetId')->nodeValue,
-            ];
+            $node_name = $reader->name;
+
+            if ('date1904' === $node_name) {
+                $this->date1904 = (int)$reader->readValue() === 1;
+            } elseif ('sheet' === $node_name) {
+                $this->worksheets[] = [
+                    'name' => $reader->getAttribute('name'),
+                    'id' => (int)$reader->getAttribute('sheetId'),
+                ];
+            }
         }
 
-        $date1904 = $dom->getElementsByTagName('date1904');
-
-        if ($date1904->length) {
-            $this->date1904 = (int)$date1904->item(0)->nodeValue === 1;
-        }
+        $reader->close();
     }
 
-
     /**
-     * @param string $path
+     * Return XMLReader for part of xlsx file.
+     *
+     * @param string $part_path
      *
      * @throws \Exception
-     * @return \DOMDocument
+     * @return \Ark4ne\XLSXReader\XMLReader
      */
-    protected function getDOMParts(string $path): DOMDocument
+    protected function getXMLReader(string $part_path): XMLReader
     {
-        $dom = new DOMDocument;
+        $reader = new XMLReader();
 
-        if ($dom->load("zip://{$this->file}#$path") !== true) {
-            throw new Exception("Can't open file {$this->file}#$path.");
+        if (!$reader->open("zip://{$this->file}#$part_path")) {
+            throw new Exception("Can't open part $part_path.");
         }
 
-        return $dom;
+        return $reader;
     }
 }
