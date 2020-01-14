@@ -23,6 +23,6 @@ foreach ($reader->read() as $row){
 
 | 65K rows, 10cols |  load (s) | read (s) | max process mem | max php mem |
 |------------------|----------:|---------:|----------------:|------------:|
-| 327K strings     | 0.416     | 3.20     | 34.9M           | 27.9M       |
-| 32K strings      | 0.044     | 3.29     | 15.0M           | 2.7M        |
-| 512 strings      | 0.010     | 3.24     | 12.8M           | 0.8M        |
+| 327K strings     | 0.433     | 1.49     | 34.7M           | 27.9M       |
+| 32K strings      | 0.044     | 1.51     | 14.6M           | 2.76M       |
+| 512 strings      | 0.002     | 1.50     | 12.6M           | 0.82M       |

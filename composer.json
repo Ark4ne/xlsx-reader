@@ -13,8 +13,7 @@
   "require": {
     "php": ">=7.0 <8.0",
     "ext-xmlreader": "*",
-    "ext-zip": "*",
-    "ext-dom": "*"
+    "ext-zip": "*"
   },
   "require-dev": {
     "phpunit/phpunit": "^6.0"
